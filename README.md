@@ -3,5 +3,5 @@
 ## Quick start
 
 ```bash
-odin #TODO
+odin run src -out=build
 ```

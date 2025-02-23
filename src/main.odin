@@ -12,6 +12,10 @@ import "core:sys/posix"
 CANONICAL_FLAGS : posix.CLocal_Flags : {.ICANON, .ECHO}
 STDIN :: posix.STDIN_FILENO
 
+TtyKeyPressed :: [3]u8
+
+K :: enum {
+}
 
 main :: proc () {
   if !posix.isatty(STDIN) do panic("Not a terminal.")
@@ -22,9 +26,9 @@ main :: proc () {
 
   display_home_screen()
   for {
-    buf: [3]u8
-    nb , err := os.read(os.stdin, buf[:])
+    buf, nb := get_key_pressed()
     if !handle_input(buf, nb) do break
+    display()
   }
 }
 
@@ -68,3 +72,12 @@ handle_input :: proc(buf: [3]u8, nb: int) -> bool {
 display_home_screen :: proc() {
   fmt.println("esc or q for quit\n")
 } 
+
+get_key_pressed :: proc() -> (buf: TtyKeyPressed, nb: int) {
+  nb , _ = os.read(os.stdin, buf[:])
+  return buf, nb
+}
+
+display :: proc() {
+  fmt.println("display")
+}

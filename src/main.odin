@@ -6,17 +6,18 @@ import "core:c"
 import "core:sys/posix"
 import "core:log"
 
-// Exemple of Noncanonical Mode in C
-// https://www.gnu.org/software/libc/manual/html_node/Noncanon-Example.html
 
 CANONICAL_FLAGS : posix.CLocal_Flags : {.ICANON, .ECHO}
 STDIN :: posix.STDIN_FILENO
+FPS := 30
+count := 0
 
 main :: proc () {
   if !posix.isatty(STDIN) do panic("Not a terminal.")
 
   termios := get_termios()
   set_terminal_non_canonical_mode(&termios)
+  set_stdin_non_blocking()
   defer set_terminal_canonical_mode(&termios)
 
   display_home_screen()
@@ -24,11 +25,15 @@ main :: proc () {
     key := get_key_pressed()
     if !handle_input(key) do break
     display()
+    count += 1
   }
 }
 
 
-// SET/UNSET THE TERMINAL IN CANONICAL MODE
+// SET/UNSET THE TERMINAL CANONICAL MODE
+
+// Exemple of Noncanonical Mode in C
+// https://www.gnu.org/software/libc/manual/html_node/Noncanon-Example.html
 get_termios :: proc() -> posix.termios {
   termios : posix.termios
   // https://pubs.opengroup.org/onlinepubs/007904975/functions/tcgetattr.html
@@ -49,6 +54,12 @@ set_terminal_non_canonical_mode :: proc(termios: ^posix.termios) {
   if res != c.int(0) do panic("Failed to set termios in non canonical mode")
 }
 
+// https://stackoverflow.com/questions/5616092/non-blocking-call-for-reading-descriptor
+set_stdin_non_blocking :: proc() {
+  flags: i32 = posix.fcntl(STDIN, posix.FCNTL_Cmd.GETFL)
+  posix.fcntl(STDIN, posix.FCNTL_Cmd.SETFL, flags | posix.O_NONBLOCK)
+}
+
 exit_gracefully :: proc(t: ^posix.termios) {
   set_terminal_canonical_mode(t)
 }
@@ -61,7 +72,6 @@ get_key_pressed :: proc() -> KeyboardKey {
   buf: TtyKeyPressed
   nb , err := os.read(os.stdin, buf[:])
   if err != nil do log.error(err, os.error_string(err))
-  fmt.printfln("error: %t", err == nil)
   if nb == 1 {
     pressed: u8 = buf[0]
     switch pressed {
@@ -76,6 +86,8 @@ get_key_pressed :: proc() -> KeyboardKey {
 
 
 handle_input :: proc(key: KeyboardKey) -> bool {
+  if key == KeyboardKey.KEY_NULL do return true // no input
+
   fmt.printfln("Pressed %c (%d)", u8(key), key)
   #partial switch key {
     case .KEY_Q, .KEY_ESCAPE : return false
@@ -150,5 +162,5 @@ display_home_screen :: proc() {
 
 
 display :: proc() {
-  fmt.println("display")
+  fmt.printfln("display %d", count)
 }

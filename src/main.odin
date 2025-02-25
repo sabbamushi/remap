@@ -24,17 +24,16 @@ CSI :: ansi.CSI   // ESC + "["
 
 // FPS
 // https://gafferongames.com/post/fix_your_timestep/
-FPS := 10
+FPS :: 3
 FRAME_DURATION_NS: time.Duration = auto_cast (1_000_000_000 / FPS)
 CURRENT_FRAME := 0
-SCREEN_RATIO :: 16/9
 TTY_WIDTH : u16 = 40
 TTY_HEIGHT : u16 = 30
-CAMERA_WIDTH := TTY_HEIGHT
-CAMERA_HEIGH := TTY_HEIGHT
-CAMERA_TTY_OFFSET_Y := 0
-CAMERA_TTY_OFFSET_X := 0
-
+CAMERA_RATIO :: 16./9.
+CAMERA_WIDTH := TTY_WIDTH
+CAMERA_HEIGHT := TTY_HEIGHT
+CAMERA_TTY_OFFSET_Y : u16 = 0
+CAMERA_TTY_OFFSET_X : u16 = 0
 
 
 
@@ -42,15 +41,12 @@ main :: proc () {
   if !posix.isatty(STDIN) do panic("Not a terminal.")
   context.logger = log.create_console_logger()
 
-  TERMIOS := get_termios()
-  set_terminal_non_canonical_mode(&TERMIOS)
-  defer set_terminal_canonical_mode(&TERMIOS)
+  termios := get_termios()
+  set_terminal_non_canonical_mode(&termios)
+  defer set_terminal_canonical_mode(&termios)
   set_stdin_non_blocking()
-  fmt.print(ansi.CSI + ansi.DECTCEM_HIDE)
 
-  w, h:= get_tty_width_and_height()
-  TTY_WIDTH = w
-  TTY_HEIGHT = h
+  TTY_WIDTH, TTY_HEIGHT:= get_tty_width_and_height()
   display_home_screen()
 
   start: time.Tick
@@ -65,7 +61,7 @@ main :: proc () {
     CURRENT_FRAME += 1
   }
 
-  exit_gracefully(&TERMIOS)
+  exit_gracefully(&termios)
 }
 
 
@@ -216,20 +212,25 @@ KeyboardKey :: enum {
 
 
 display_home_screen :: proc() {
-  // \e[?25l
+  fmt.print(ansi.CSI + ansi.DECTCEM_HIDE) // hide cursor
   fmt.println("esc or q for quit\n")
 } 
 
 //TODO build the entire string to print (including ANSI codes)
 render :: proc() {
   if CURRENT_FRAME % FPS == 0 { // once per second
-    w, h := get_tty_width_and_height()
-    TTY_WIDTH = w
-    TTY_HEIGHT = h
+    TTY_WIDTH, TTY_HEIGHT = get_tty_width_and_height()
+    CAMERA_WIDTH, CAMERA_HEIGHT = get_camera_width_and_height(TTY_WIDTH, TTY_HEIGHT, CAMERA_RATIO)
+    CAMERA_TTY_OFFSET_X, CAMERA_TTY_OFFSET_Y = get_camera_offsets(TTY_WIDTH, TTY_HEIGHT, CAMERA_WIDTH, CAMERA_HEIGHT)
   }
   clear_tty()
-  print_corner()
+
+  fmt.printf("\e[%d;%dHA", CAMERA_TTY_OFFSET_Y, CAMERA_TTY_OFFSET_X)
+  fmt.printf("\e[%d;%dHB", CAMERA_TTY_OFFSET_Y, CAMERA_TTY_OFFSET_X + CAMERA_WIDTH)
+  fmt.printf("\e[%d;%dHC", CAMERA_TTY_OFFSET_Y + CAMERA_HEIGHT, CAMERA_TTY_OFFSET_X + CAMERA_WIDTH)
+  fmt.printf("\e[%d;%dHD", CAMERA_TTY_OFFSET_Y + CAMERA_HEIGHT, CAMERA_TTY_OFFSET_X)
 }
+
 get_tty_width_and_height :: proc() -> (u16, u16) {
   set_stdin_blocking()
   fmt.print(ansi.CSI + "9999;9999" + ansi.CUP)
@@ -242,25 +243,42 @@ get_tty_width_and_height :: proc() -> (u16, u16) {
     log.error("Failed to get ANSI DSR response")
     return TTY_WIDTH, TTY_HEIGHT
   }
+  height_and_width_str := strings.split(string(buffer[2:nb-1]), ";")
+  if len(height_and_width_str) != 2 do return TTY_WIDTH, TTY_HEIGHT
 
-  height_and_height_str := strings.split(string(buffer[2:nb-1]), ";")
-  if len(height_and_height_str) != 2 do return TTY_WIDTH, TTY_HEIGHT
-
-  height, w_ok := strconv.parse_int(height_and_height_str[0])
-  width, h_ok := strconv.parse_int(height_and_height_str[1])
+  height, w_ok := strconv.parse_int(height_and_width_str[0])
+  width, h_ok := strconv.parse_int(height_and_width_str[1])
   
   if w_ok && h_ok do return u16(width), u16(height)
   else do return TTY_WIDTH, TTY_HEIGHT
 }
 
-print_corner :: proc() {
-  corner := fmt.aprintf("[%d] %dx%d", CURRENT_FRAME, TTY_HEIGHT, TTY_WIDTH)
-  defer delete(corner)
-
-  fmt.printf(ansi.CSI + ansi.CUP)
-  fmt.printf(ansi.CSI + "%d;%d" + ansi.CUP + "%s", TTY_HEIGHT, int(TTY_WIDTH) - len(corner), corner)
-}
-
 clear_tty :: proc() {
   fmt.print(ansi.CSI + ansi.FAINT + ansi.ED)
+}
+
+get_camera_width_and_height :: proc(max_width: u16, max_height: u16, ratio: f32) -> (w: u16, h: u16) {
+  scaled_max_width := max_width/2
+
+  if ratio == 1. {
+    side := min(scaled_max_width, max_height)
+    w, h = side, side
+  }
+  tty_ratio := f32(scaled_max_width) / f32(max_height)
+  if ratio > 1. { // camera width > camera height
+    ratio_limit_width := min(u16(f32(max_height) * ratio), scaled_max_width)
+    w, h = ratio_limit_width, u16(f32(ratio_limit_width) / ratio)
+  }
+  if ratio < 1. { // h > w
+    ratio_limit_height := min( u16(f32(scaled_max_width) / ratio), max_height)
+    w, h = u16(f32(ratio_limit_height) * ratio), ratio_limit_height
+  }
+
+  return w*2, h
+}
+
+get_camera_offsets :: proc(max_w: u16, max_h: u16, c_width: u16, c_height: u16) -> (x_of: u16, y_of: u16) {
+  x_of = (max_w - c_width) / 2
+  y_of = (max_h - c_height) / 2
+  return max(0, x_of), max(0, y_of) // ensure not negative offset
 }

@@ -5,28 +5,67 @@ import "core:os"
 import "core:c"
 import "core:sys/posix"
 import "core:log"
-
+import "core:time"
+import "core:encoding/ansi"
+import "core:mem"
+import "core:strings"
+import "core:strconv"
+import "base:builtin"
+import "base:runtime"
+import "core:io"
 
 CANONICAL_FLAGS : posix.CLocal_Flags : {.ICANON, .ECHO}
 STDIN :: posix.STDIN_FILENO
-FPS := 30
-count := 0
+STDOUT :: posix.STDOUT_FILENO
+
+// ANSI
+CSI :: ansi.CSI   // ESC + "["
+
+
+// FPS
+// https://gafferongames.com/post/fix_your_timestep/
+FPS := 10
+FRAME_DURATION_NS: time.Duration = auto_cast (1_000_000_000 / FPS)
+CURRENT_FRAME := 0
+SCREEN_RATIO :: 16/9
+TTY_WIDTH : u16 = 40
+TTY_HEIGHT : u16 = 30
+CAMERA_WIDTH := TTY_HEIGHT
+CAMERA_HEIGH := TTY_HEIGHT
+CAMERA_TTY_OFFSET_Y := 0
+CAMERA_TTY_OFFSET_X := 0
+
+
+
 
 main :: proc () {
   if !posix.isatty(STDIN) do panic("Not a terminal.")
+  context.logger = log.create_console_logger()
 
-  termios := get_termios()
-  set_terminal_non_canonical_mode(&termios)
+  TERMIOS := get_termios()
+  set_terminal_non_canonical_mode(&TERMIOS)
+  defer set_terminal_canonical_mode(&TERMIOS)
   set_stdin_non_blocking()
-  defer set_terminal_canonical_mode(&termios)
+  fmt.print(ansi.CSI + ansi.DECTCEM_HIDE)
 
+  w, h:= get_tty_width_and_height()
+  TTY_WIDTH = w
+  TTY_HEIGHT = h
   display_home_screen()
+
+  start: time.Tick
   for {
     key := get_key_pressed()
     if !handle_input(key) do break
-    display()
-    count += 1
+
+    render()
+
+    elapsed := time.tick_lap_time(&start)
+    if elapsed < FRAME_DURATION_NS do time.accurate_sleep(FRAME_DURATION_NS - elapsed)
+    CURRENT_FRAME += 1
   }
+
+  exit_gracefully(&TERMIOS)
 }
 
 
@@ -60,18 +99,32 @@ set_stdin_non_blocking :: proc() {
   posix.fcntl(STDIN, posix.FCNTL_Cmd.SETFL, flags | posix.O_NONBLOCK)
 }
 
+set_stdin_blocking :: proc() {
+  flags: i32 = posix.fcntl(STDIN, posix.FCNTL_Cmd.GETFL)
+  posix.fcntl(STDIN, posix.FCNTL_Cmd.SETFL, flags & ~i32(posix.O_NONBLOCK))
+}
+
 exit_gracefully :: proc(t: ^posix.termios) {
   set_terminal_canonical_mode(t)
+  fmt.print(ansi.CSI + ansi.DECTCEM_SHOW)
+  log.destroy_console_logger(context.logger)
+  os.exit(0)
 }
 
 
 // INPUT / OUTPUT
-TtyKeyPressed :: [3]u8
+TtyKeyPressed :: [16]u8
 
 get_key_pressed :: proc() -> KeyboardKey {
   buf: TtyKeyPressed
   nb , err := os.read(os.stdin, buf[:])
-  if err != nil do log.error(err, os.error_string(err))
+  if err != nil {
+    p_err, ok := os.is_platform_error(err)
+    if ok && p_err == posix.EAGAIN do return KeyboardKey.KEY_NULL
+    else do log.error(err, os.error_string(err))
+  }
+  if nb == -1 do return KeyboardKey.KEY_NULL // no input
+
   if nb == 1 {
     pressed: u8 = buf[0]
     switch pressed {
@@ -79,7 +132,12 @@ get_key_pressed :: proc() -> KeyboardKey {
       case 'A'..='Z', '0'..='9' : return KeyboardKey(pressed)
       case 'a'..='z': return KeyboardKey('A' + pressed - 'a')
       case '\e': return KeyboardKey.KEY_ESCAPE
+      case ' ': return KeyboardKey.KEY_SPACE
     }    
+  } else if nb == 4 {
+    fmt.printfln("Pressed %d : %d %d %d %d", nb, buf[0], buf[1], buf[2], buf[3])
+  } else {
+    fmt.printf("%s", string(buf[1:]))
   }
   return KeyboardKey.KEY_NULL
 }
@@ -87,10 +145,11 @@ get_key_pressed :: proc() -> KeyboardKey {
 
 handle_input :: proc(key: KeyboardKey) -> bool {
   if key == KeyboardKey.KEY_NULL do return true // no input
-
-  fmt.printfln("Pressed %c (%d)", u8(key), key)
+  key_str, _ := fmt.enum_value_to_string(key)
+  fmt.printfln("Pressed %s (%d)", key_str, key)
   #partial switch key {
     case .KEY_Q, .KEY_ESCAPE : return false
+    
   }
   return true
 }
@@ -157,10 +216,51 @@ KeyboardKey :: enum {
 
 
 display_home_screen :: proc() {
+  // \e[?25l
   fmt.println("esc or q for quit\n")
 } 
 
+//TODO build the entire string to print (including ANSI codes)
+render :: proc() {
+  if CURRENT_FRAME % FPS == 0 { // once per second
+    w, h := get_tty_width_and_height()
+    TTY_WIDTH = w
+    TTY_HEIGHT = h
+  }
+  clear_tty()
+  print_corner()
+}
+get_tty_width_and_height :: proc() -> (u16, u16) {
+  set_stdin_blocking()
+  fmt.print(ansi.CSI + "9999;9999" + ansi.CUP)
+  fmt.println(ansi.CSI + ansi.DSR)
+  buffer : TtyKeyPressed
+  nb, _ := os.read(STDIN, buffer[:])
+  set_stdin_non_blocking()
 
-display :: proc() {
-  fmt.printfln("display %d", count)
+  if nb < 3 {
+    log.error("Failed to get ANSI DSR response")
+    return TTY_WIDTH, TTY_HEIGHT
+  }
+
+  height_and_height_str := strings.split(string(buffer[2:nb-1]), ";")
+  if len(height_and_height_str) != 2 do return TTY_WIDTH, TTY_HEIGHT
+
+  height, w_ok := strconv.parse_int(height_and_height_str[0])
+  width, h_ok := strconv.parse_int(height_and_height_str[1])
+  
+  if w_ok && h_ok do return u16(width), u16(height)
+  else do return TTY_WIDTH, TTY_HEIGHT
+}
+
+print_corner :: proc() {
+  corner := fmt.aprintf("[%d] %dx%d", CURRENT_FRAME, TTY_HEIGHT, TTY_WIDTH)
+  defer delete(corner)
+
+  fmt.printf(ansi.CSI + ansi.CUP)
+  fmt.printf(ansi.CSI + "%d;%d" + ansi.CUP + "%s", TTY_HEIGHT, int(TTY_WIDTH) - len(corner), corner)
+}
+
+clear_tty :: proc() {
+  fmt.print(ansi.CSI + ansi.FAINT + ansi.ED)
 }

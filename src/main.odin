@@ -10,58 +10,89 @@ import "core:encoding/ansi"
 import "core:mem"
 import "core:strings"
 import "core:strconv"
-import "base:builtin"
-import "base:runtime"
 import "core:io"
+import "domain"
+
 
 CANONICAL_FLAGS : posix.CLocal_Flags : {.ICANON, .ECHO}
 STDIN :: posix.STDIN_FILENO
 STDOUT :: posix.STDOUT_FILENO
 
-// ANSI
-CSI :: ansi.CSI   // ESC + "["
-
-
-// FPS
+// TODO FPS
 // https://gafferongames.com/post/fix_your_timestep/
-FPS :: 3
-FRAME_DURATION_NS: time.Duration = auto_cast (1_000_000_000 / FPS)
-CURRENT_FRAME := 0
-TTY_WIDTH : u16 = 40
-TTY_HEIGHT : u16 = 30
-CAMERA_RATIO :: 16./9.
-CAMERA_WIDTH := TTY_WIDTH
-CAMERA_HEIGHT := TTY_HEIGHT
-CAMERA_TTY_OFFSET_Y : u16 = 0
-CAMERA_TTY_OFFSET_X : u16 = 0
 
 
+GLOBAL_STATE : GlobalState
+
+GlobalState :: struct {
+  game: domain.Game,
+  cli: Cli,
+}
+
+Cli :: struct {
+  tty: struct {
+    termios: posix.termios, 
+    resolution: Resolution
+  },
+  screen: CliScreen,
+  current_frame: u128,
+  fps: u128,
+  frame_duration : time.Duration, 
+}
+
+CliScreen :: struct {
+  resolution: Resolution,
+  ratio: f32,
+  offset: ScreenOffset,
+}
+
+Resolution :: struct {width, height: u16}
+
+ScreenOffset :: struct {horizontal, vertical : u16}
 
 main :: proc () {
-  if !posix.isatty(STDIN) do panic("Not a terminal.")
   context.logger = log.create_console_logger()
+
+  cli := &GLOBAL_STATE.cli
 
   termios := get_termios()
   set_terminal_non_canonical_mode(&termios)
   defer set_terminal_canonical_mode(&termios)
   set_stdin_non_blocking()
+  cli.tty.termios = termios
 
-  TTY_WIDTH, TTY_HEIGHT:= get_tty_width_and_height()
+  cli.fps = 16
+  cli.current_frame = 0
+  cli.frame_duration = auto_cast (1_000_000_000 / int(GLOBAL_STATE.cli.fps))
+  cli.screen.ratio = 16./9.
+
+  update_cli_screen(&GLOBAL_STATE.cli.screen, get_tty_width_and_height().? or_else cli.tty.resolution)
+
   display_home_screen()
+
+  GLOBAL_STATE.game.m.pieces[{0,0}] = {
+    borders={
+      north=domain.BorderKind.Plain,
+      east=domain.BorderKind.Plain,
+      south=domain.BorderKind.Plain,
+      west=domain.BorderKind.Plain,
+    }
+  }
 
   start: time.Tick
   for {
     key := get_key_pressed()
     if !handle_input(key) do break
 
-    render()
+    scale_screen_to_tty(cli)
+    render(cli)
 
     elapsed := time.tick_lap_time(&start)
-    if elapsed < FRAME_DURATION_NS do time.accurate_sleep(FRAME_DURATION_NS - elapsed)
-    CURRENT_FRAME += 1
+    if elapsed < cli.frame_duration do time.accurate_sleep(cli.frame_duration - elapsed)
+    cli.current_frame += 1
   }
 
-  exit_gracefully(&termios)
+  exit_gracefully(&cli.tty.termios)
 }
 
 
@@ -70,6 +101,8 @@ main :: proc () {
 // Exemple of Noncanonical Mode in C
 // https://www.gnu.org/software/libc/manual/html_node/Noncanon-Example.html
 get_termios :: proc() -> posix.termios {
+  if !posix.isatty(STDIN) do panic("Not a terminal.")
+
   termios : posix.termios
   // https://pubs.opengroup.org/onlinepubs/007904975/functions/tcgetattr.html
   res := cast(c.int) posix.tcgetattr(STDIN, &termios)
@@ -108,7 +141,7 @@ exit_gracefully :: proc(t: ^posix.termios) {
 }
 
 
-// INPUT / OUTPUT
+// INPUT
 TtyKeyPressed :: [16]u8
 
 get_key_pressed :: proc() -> KeyboardKey {
@@ -209,29 +242,34 @@ KeyboardKey :: enum {
   KEY_UP              = 265,      // Key: Cursor up
 }
 
-
+// OUTPUT
 
 display_home_screen :: proc() {
   fmt.print(ansi.CSI + ansi.DECTCEM_HIDE) // hide cursor
   fmt.println("esc or q for quit\n")
-} 
-
-//TODO build the entire string to print (including ANSI codes)
-render :: proc() {
-  if CURRENT_FRAME % FPS == 0 { // once per second
-    TTY_WIDTH, TTY_HEIGHT = get_tty_width_and_height()
-    CAMERA_WIDTH, CAMERA_HEIGHT = get_camera_width_and_height(TTY_WIDTH, TTY_HEIGHT, CAMERA_RATIO)
-    CAMERA_TTY_OFFSET_X, CAMERA_TTY_OFFSET_Y = get_camera_offsets(TTY_WIDTH, TTY_HEIGHT, CAMERA_WIDTH, CAMERA_HEIGHT)
-  }
-  clear_tty()
-
-  fmt.printf("\e[%d;%dHA", CAMERA_TTY_OFFSET_Y, CAMERA_TTY_OFFSET_X)
-  fmt.printf("\e[%d;%dHB", CAMERA_TTY_OFFSET_Y, CAMERA_TTY_OFFSET_X + CAMERA_WIDTH)
-  fmt.printf("\e[%d;%dHC", CAMERA_TTY_OFFSET_Y + CAMERA_HEIGHT, CAMERA_TTY_OFFSET_X + CAMERA_WIDTH)
-  fmt.printf("\e[%d;%dHD", CAMERA_TTY_OFFSET_Y + CAMERA_HEIGHT, CAMERA_TTY_OFFSET_X)
 }
 
-get_tty_width_and_height :: proc() -> (u16, u16) {
+scale_screen_to_tty :: proc(cli: ^Cli) {
+  // once per second
+  if cli.current_frame % cli.fps != 0 do return
+
+  tty_resolution := get_tty_width_and_height().? or_else cli.tty.resolution
+  update_cli_screen(&cli.screen, tty_resolution)
+}
+
+//TODO build the entire string to print (including ANSI codes)
+render :: proc(cli: ^Cli) {
+  clear_tty()
+
+  of := cli.screen.offset
+  s := cli.screen
+  fmt.printf("\e[%d;%dHA", of.vertical, of.horizontal)
+  fmt.printf("\e[%d;%dHB", of.vertical, of.horizontal + s.resolution.width)
+  fmt.printf("\e[%d;%dHC", of.vertical + s.resolution.height, of.horizontal + s.resolution.width)
+  fmt.printf("\e[%d;%dHD", of.vertical + s.resolution.height, of.horizontal)
+}
+
+get_tty_width_and_height :: proc() -> Maybe(Resolution) {
   set_stdin_blocking()
   fmt.print(ansi.CSI + "9999;9999" + ansi.CUP)
   fmt.println(ansi.CSI + ansi.DSR)
@@ -239,46 +277,53 @@ get_tty_width_and_height :: proc() -> (u16, u16) {
   nb, _ := os.read(STDIN, buffer[:])
   set_stdin_non_blocking()
 
-  if nb < 3 {
+  if nb < 3 { // min is '#;#'
     log.error("Failed to get ANSI DSR response")
-    return TTY_WIDTH, TTY_HEIGHT
+    return nil
   }
   height_and_width_str := strings.split(string(buffer[2:nb-1]), ";")
-  if len(height_and_width_str) != 2 do return TTY_WIDTH, TTY_HEIGHT
+  if len(height_and_width_str) != 2 do return nil
 
-  height, w_ok := strconv.parse_int(height_and_width_str[0])
-  width, h_ok := strconv.parse_int(height_and_width_str[1])
+  height, w_ok := strconv.parse_uint(height_and_width_str[0])
+  width, h_ok := strconv.parse_uint(height_and_width_str[1])
   
-  if w_ok && h_ok do return u16(width), u16(height)
-  else do return TTY_WIDTH, TTY_HEIGHT
+  if w_ok && h_ok do return Resolution{u16(width), u16(height)}
+  else do return nil
+}
+
+update_cli_screen :: proc(s: ^CliScreen, tty_res: Resolution) {
+  r := get_screen_width_and_height(tty_res, s.ratio)
+  s.resolution.width, s.resolution.height = r.width, r.height
+  s.offset = get_screen_offsets(tty_res, s.resolution)
 }
 
 clear_tty :: proc() {
   fmt.print(ansi.CSI + ansi.FAINT + ansi.ED)
 }
 
-get_camera_width_and_height :: proc(max_width: u16, max_height: u16, ratio: f32) -> (w: u16, h: u16) {
-  scaled_max_width := max_width/2
-
+get_screen_width_and_height :: proc(max: Resolution, ratio: f32) -> Resolution {
+  scaled_max_width := max.width/2
+  w, h : u16
   if ratio == 1. {
-    side := min(scaled_max_width, max_height)
+    side := min(scaled_max_width, max.height)
     w, h = side, side
   }
-  tty_ratio := f32(scaled_max_width) / f32(max_height)
+  tty_ratio := f32(scaled_max_width) / f32(max.height)
   if ratio > 1. { // camera width > camera height
-    ratio_limit_width := min(u16(f32(max_height) * ratio), scaled_max_width)
+    ratio_limit_width := min(u16(f32(max.height) * ratio), scaled_max_width)
     w, h = ratio_limit_width, u16(f32(ratio_limit_width) / ratio)
   }
   if ratio < 1. { // h > w
-    ratio_limit_height := min( u16(f32(scaled_max_width) / ratio), max_height)
+    ratio_limit_height := min( u16(f32(scaled_max_width) / ratio), max.height)
     w, h = u16(f32(ratio_limit_height) * ratio), ratio_limit_height
   }
 
-  return w*2, h
+  return {w*2, h}
 }
 
-get_camera_offsets :: proc(max_w: u16, max_h: u16, c_width: u16, c_height: u16) -> (x_of: u16, y_of: u16) {
-  x_of = (max_w - c_width) / 2
-  y_of = (max_h - c_height) / 2
-  return max(0, x_of), max(0, y_of) // ensure not negative offset
+// TODO take resolutions
+get_screen_offsets :: proc(max: Resolution, screen: Resolution) -> ScreenOffset {
+  horizontal := (max.width - screen.width) / 2 if  max.width > screen.width else 0
+  vertical := (max.height - screen.height) / 2 if max.height > screen.height else 0
+  return {horizontal, vertical}
 }

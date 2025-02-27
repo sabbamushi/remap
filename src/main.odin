@@ -18,6 +18,11 @@ CANONICAL_FLAGS : posix.CLocal_Flags : {.ICANON, .ECHO}
 STDIN :: posix.STDIN_FILENO
 STDOUT :: posix.STDOUT_FILENO
 
+// Displayed ratio between cols and lines
+// lines are usually 2 times taller than a column is large
+// So a square needs 2 times more columns than lines to look like ... a square
+TTY_COLUMNS_LINES_RATIO :f32 : 2. 
+
 // TODO FPS
 // https://gafferongames.com/post/fix_your_timestep/
 
@@ -32,42 +37,54 @@ GlobalState :: struct {
 Cli :: struct {
   tty: struct {
     termios: posix.termios, 
-    resolution: Resolution
+    resolution: Resolution,
+    was_resized: bool,
   },
   screen: CliScreen,
   current_frame: u128,
   fps: u128,
-  frame_duration : time.Duration, 
+  frame_duration: time.Duration, 
+  clear_refresh_rate: u128,
 }
 
 CliScreen :: struct {
   resolution: Resolution,
   ratio: f32,
-  offset: ScreenOffset,
+  coordinate: Coordinate, 
+  cells: Cells,
+  scale_refresh_rate: u128 "in seconds"
 }
 
 Resolution :: struct {width, height: u16}
-
-ScreenOffset :: struct {horizontal, vertical : u16}
+Coordinate :: struct {x, y: u16}
+Cells :: [dynamic][dynamic]Cell
+Cell :: struct {
+  r: rune,
+  color: string, // ansi color
+  has_changed: bool
+}
 
 main :: proc () {
   context.logger = log.create_console_logger()
-
-  cli := &GLOBAL_STATE.cli
 
   termios := get_termios()
   set_terminal_non_canonical_mode(&termios)
   defer set_terminal_canonical_mode(&termios)
   set_stdin_non_blocking()
-  cli.tty.termios = termios
 
-  cli.fps = 16
-  cli.current_frame = 0
-  cli.frame_duration = auto_cast (1_000_000_000 / int(GLOBAL_STATE.cli.fps))
-  cli.screen.ratio = 16./9.
+  cli := &GLOBAL_STATE.cli
+  cli^ = {
+    tty = {termios = termios},
+    fps = 20,
+    frame_duration = auto_cast (1_000_000_000 / int(5)),
+    screen = {
+      ratio = 16./9.,
+      scale_refresh_rate = 1,
+    },
+    clear_refresh_rate = 30,
+  }
 
-  update_cli_screen(&GLOBAL_STATE.cli.screen, get_tty_width_and_height().? or_else cli.tty.resolution)
-
+  scale_screen_to_tty(cli)
   display_home_screen()
 
   GLOBAL_STATE.game.m.pieces[{0,0}] = {
@@ -84,7 +101,9 @@ main :: proc () {
     key := get_key_pressed()
     if !handle_input(key) do break
 
-    scale_screen_to_tty(cli)
+    if cli.current_frame % (cli.fps * cli.screen.scale_refresh_rate) == 0 do scale_screen_to_tty(cli)
+    if cli.current_frame % (cli.fps * cli.clear_refresh_rate) == 0 do clear_tty_and_set_cells_to_changed(&cli.screen.cells)
+    
     render(cli)
 
     elapsed := time.tick_lap_time(&start)
@@ -92,6 +111,7 @@ main :: proc () {
     cli.current_frame += 1
   }
 
+  // TODO catch SIGTERM
   exit_gracefully(&cli.tty.termios)
 }
 
@@ -244,35 +264,48 @@ KeyboardKey :: enum {
 
 // OUTPUT
 
+ANSI_POSITION_FMT :: "%d;%d"
+ANSI_SET_CURSOR_FMT :: ansi.CSI + ANSI_POSITION_FMT + ansi.CUP
+ANSI_CLEAR_LINE :: ansi.CSI + ansi.FAINT + ansi.EL // \e[2K
+ANSI_GET_CURSOR_POSITION :: ansi.CSI + ansi.DSR
+ANSI_CLEAR_TTY :: ansi.CSI + ansi.FAINT + ansi.ED
+
 display_home_screen :: proc() {
   fmt.print(ansi.CSI + ansi.DECTCEM_HIDE) // hide cursor
   fmt.println("esc or q for quit\n")
 }
 
 scale_screen_to_tty :: proc(cli: ^Cli) {
-  // once per second
-  if cli.current_frame % cli.fps != 0 do return
-
   tty_resolution := get_tty_width_and_height().? or_else cli.tty.resolution
-  update_cli_screen(&cli.screen, tty_resolution)
+
+  tty_was_resized := (tty_resolution != cli.tty.resolution)
+  if tty_was_resized do update_cli_screen(&cli.screen, tty_resolution)
+  cli.tty.was_resized = tty_was_resized
 }
 
-//TODO build the entire string to print (including ANSI codes)
 render :: proc(cli: ^Cli) {
-  clear_tty()
-
-  of := cli.screen.offset
+  of := cli.screen.coordinate
   s := cli.screen
-  fmt.printf("\e[%d;%dHA", of.vertical, of.horizontal)
-  fmt.printf("\e[%d;%dHB", of.vertical, of.horizontal + s.resolution.width)
-  fmt.printf("\e[%d;%dHC", of.vertical + s.resolution.height, of.horizontal + s.resolution.width)
-  fmt.printf("\e[%d;%dHD", of.vertical + s.resolution.height, of.horizontal)
+
+  for &line in s.cells {
+    for &cell in line {
+      cell = {r = '`', has_changed = true} if cell.r != '`' else {r = '`', has_changed = false}
+    }
+  }
+
+  if cli.tty.was_resized do clear_tty_and_set_cells_to_changed(&cli.screen.cells)
+  else do for y in 0..<of.y do fmt.printf(ANSI_SET_CURSOR_FMT + ANSI_CLEAR_LINE, y, 0)
+
+  for line, i in s.cells {
+    fmt.printf(ANSI_SET_CURSOR_FMT, of.y + u16(i), of.x)
+    for cell in line do if cell.has_changed do fmt.printf("%c", cell.r)
+  }
 }
 
 get_tty_width_and_height :: proc() -> Maybe(Resolution) {
   set_stdin_blocking()
-  fmt.print(ansi.CSI + "9999;9999" + ansi.CUP)
-  fmt.println(ansi.CSI + ansi.DSR)
+  fmt.printf(ANSI_SET_CURSOR_FMT, 9999, 9999)
+  fmt.println(ANSI_GET_CURSOR_POSITION)
   buffer : TtyKeyPressed
   nb, _ := os.read(STDIN, buffer[:])
   set_stdin_non_blocking()
@@ -292,38 +325,45 @@ get_tty_width_and_height :: proc() -> Maybe(Resolution) {
 }
 
 update_cli_screen :: proc(s: ^CliScreen, tty_res: Resolution) {
-  r := get_screen_width_and_height(tty_res, s.ratio)
-  s.resolution.width, s.resolution.height = r.width, r.height
-  s.offset = get_screen_offsets(tty_res, s.resolution)
+  s.resolution = get_screen_width_and_height(tty_res, s.ratio)
+  s.coordinate = get_screen_coordinate(tty_res, s.resolution)
+
+  resize(&s.cells, s.resolution.height)
+  for &line in s.cells {
+    resize(&line, s.resolution.width)
+  }
 }
 
-clear_tty :: proc() {
-  fmt.print(ansi.CSI + ansi.FAINT + ansi.ED)
+clear_tty_and_set_cells_to_changed :: proc(cells: ^Cells) {
+  fmt.print(ANSI_CLEAR_TTY)
+ 
+  for &line in cells {
+    for &cell in line do cell.has_changed = true
+  }
 }
 
-get_screen_width_and_height :: proc(max: Resolution, ratio: f32) -> Resolution {
-  scaled_max_width := max.width/2
+get_screen_width_and_height :: proc(max: Resolution, screen_ratio: f32) -> Resolution {
+  scaled_max_width := max.width/2 // TTY_COLUMNS_LINES_RATIO
   w, h : u16
-  if ratio == 1. {
+  if screen_ratio == 1. {
     side := min(scaled_max_width, max.height)
     w, h = side, side
   }
   tty_ratio := f32(scaled_max_width) / f32(max.height)
-  if ratio > 1. { // camera width > camera height
-    ratio_limit_width := min(u16(f32(max.height) * ratio), scaled_max_width)
-    w, h = ratio_limit_width, u16(f32(ratio_limit_width) / ratio)
+  if screen_ratio > 1. { // camera width > camera height
+    ratio_limit_width := min(u16(f32(max.height) * screen_ratio), scaled_max_width)
+    w, h = ratio_limit_width, u16(f32(ratio_limit_width) / screen_ratio)
   }
-  if ratio < 1. { // h > w
-    ratio_limit_height := min( u16(f32(scaled_max_width) / ratio), max.height)
-    w, h = u16(f32(ratio_limit_height) * ratio), ratio_limit_height
+  if screen_ratio < 1. { // h > w
+    ratio_limit_height := min( u16(f32(scaled_max_width) / screen_ratio), max.height)
+    w, h = u16(f32(ratio_limit_height) * screen_ratio), ratio_limit_height
   }
 
   return {w*2, h}
 }
 
-// TODO take resolutions
-get_screen_offsets :: proc(max: Resolution, screen: Resolution) -> ScreenOffset {
-  horizontal := (max.width - screen.width) / 2 if  max.width > screen.width else 0
-  vertical := (max.height - screen.height) / 2 if max.height > screen.height else 0
-  return {horizontal, vertical}
+get_screen_coordinate :: proc(max: Resolution, screen: Resolution) -> Coordinate {
+  x := (max.width - screen.width) / 2 if  max.width > screen.width else 0
+  y := (max.height - screen.height) / 2 if max.height > screen.height else 0
+  return {x, y}
 }

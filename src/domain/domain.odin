@@ -2,6 +2,7 @@ package domain
 
 Game :: struct {
   m: Map,
+  player: Player,
 }
 
 Map :: struct {
@@ -28,3 +29,9 @@ Cell :: enum {
 Player :: struct {
   position_in_piece: Position,
 }
+
+Camera :: struct {
+  game: ^Game,
+}
+
+// camera_to_screen

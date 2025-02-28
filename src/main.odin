@@ -11,17 +11,13 @@ import "core:mem"
 import "core:strings"
 import "core:strconv"
 import "core:io"
+import "base:runtime"
 import "domain"
 
 
-CANONICAL_FLAGS : posix.CLocal_Flags : {.ICANON, .ECHO}
 STDIN :: posix.STDIN_FILENO
 STDOUT :: posix.STDOUT_FILENO
 
-// Displayed ratio between cols and lines
-// lines are usually 2 times taller than a column is large
-// So a square needs 2 times more columns than lines to look like ... a square
-TTY_COLUMNS_LINES_RATIO :f32 : 2. 
 
 // TODO FPS
 // https://gafferongames.com/post/fix_your_timestep/
@@ -35,16 +31,19 @@ GlobalState :: struct {
 }
 
 Cli :: struct {
-  tty: struct {
-    termios: posix.termios, 
-    resolution: Resolution,
-    was_resized: bool,
-  },
+  tty: Tty,
   screen: CliScreen,
   current_frame: u128,
   fps: u128,
   frame_duration: time.Duration, 
   clear_refresh_rate: u128,
+}
+
+Tty :: struct {
+  termios: posix.termios, 
+  resolution: Resolution,
+  was_resized: bool,
+  log: string,
 }
 
 CliScreen :: struct {
@@ -61,28 +60,71 @@ Cells :: [dynamic][dynamic]Cell
 Cell :: struct {
   r: rune,
   color: string, // ansi color
-  has_changed: bool
 }
 
-main :: proc () {
-  context.logger = log.create_console_logger()
 
-  termios := get_termios()
-  set_terminal_non_canonical_mode(&termios)
-  defer set_terminal_canonical_mode(&termios)
-  set_stdin_non_blocking()
+Configuration :: struct {
+  FPS: u128                     "Number of frames per seconds, u128 because calculations with big numbers",
+  SCREEN_RATIO: f32             "Visual ratio of width/heigth",
+  SCALE_REFRESH_RATE: u128      "Number of seconds between two tty resize checks",
+  CLEAR_REFRESH_RATE: u128      "Number of seconds between two (ansi) clear of tty (in case of display bug)",
+  LOGGER: runtime.Logger,
+
+  // 
+  // 
+  // So a square needs 2 times more columns than lines to look like ... a square
+  TTY_FONT_RATIO:f32            "TTY ratio between cols and lines, lines are usually 2 times taller than a column is large", 
+}
+
+DEFAULT_CONFIGURATION : Configuration = {
+  FPS = 10,
+  SCREEN_RATIO = 16./9.,
+  SCALE_REFRESH_RATE = 1,
+  CLEAR_REFRESH_RATE = 30,
+  LOGGER = my_logger(),
+  TTY_FONT_RATIO = 2.,
+}
+
+my_logger :: proc() -> log.Logger {
+  logger := log.create_console_logger()
+
+  logger.procedure = proc(d: rawptr, l: log.Level, text: string, o: log.Options, c := #caller_location) {
+    delete(GLOBAL_STATE.cli.tty.log)
+
+    data := cast(^log.File_Console_Logger_Data)d
+
+    backing: [255]byte
+    buf := strings.builder_from_bytes(backing[:])
+    log.do_level_header(o, &buf, l)
+    when time.IS_SUPPORTED do log.do_time_header(o, &buf, time.now())
+    log.do_location_header(o, &buf, c)
+    if data.ident != "" do fmt.sbprintf(&buf, "[%s] ", data.ident)
+    
+    GLOBAL_STATE.cli.tty.log = fmt.aprintf("%s%s\n", strings.to_string(buf), text)
+  }
+
+  return logger
+}
+
+// TODO REFACTO avec USING !!! https://odin-lang.org/docs/overview/#using-statement-with-structs
+
+main :: proc () {
+  conf := DEFAULT_CONFIGURATION
+  context.logger = conf.LOGGER
 
   cli := &GLOBAL_STATE.cli
   cli^ = {
-    tty = {termios = termios},
-    fps = 20,
-    frame_duration = auto_cast (1_000_000_000 / int(5)),
+    tty = init_tty(),
+    fps = conf.FPS,
+    frame_duration = auto_cast (1_000_000_000 / conf.FPS),
     screen = {
-      ratio = 16./9.,
-      scale_refresh_rate = 1,
+      ratio = conf.SCREEN_RATIO,
+      scale_refresh_rate = conf.SCALE_REFRESH_RATE,
     },
-    clear_refresh_rate = 30,
+    clear_refresh_rate = conf.CLEAR_REFRESH_RATE,
   }
+  // TODO catch SIGTERM
+  defer exit_gracefully(&cli.tty.termios)
 
   scale_screen_to_tty(cli)
   display_home_screen()
@@ -102,7 +144,7 @@ main :: proc () {
     if !handle_input(key) do break
 
     if cli.current_frame % (cli.fps * cli.screen.scale_refresh_rate) == 0 do scale_screen_to_tty(cli)
-    if cli.current_frame % (cli.fps * cli.clear_refresh_rate) == 0 do clear_tty_and_set_cells_to_changed(&cli.screen.cells)
+    if cli.current_frame % (cli.fps * cli.clear_refresh_rate) == 0 do clear_tty()
     
     render(cli)
 
@@ -110,13 +152,22 @@ main :: proc () {
     if elapsed < cli.frame_duration do time.accurate_sleep(cli.frame_duration - elapsed)
     cli.current_frame += 1
   }
-
-  // TODO catch SIGTERM
-  exit_gracefully(&cli.tty.termios)
 }
 
 
 // SET/UNSET THE TERMINAL CANONICAL MODE
+
+CANONICAL_FLAGS : posix.CLocal_Flags : {.ICANON, .ECHO}
+
+init_tty :: proc() -> Tty {
+  termios := get_termios()
+  set_terminal_non_canonical_mode(&termios)
+  set_stdin_non_blocking()
+
+  return {
+    termios = termios,
+  }
+}
 
 // Exemple of Noncanonical Mode in C
 // https://www.gnu.org/software/libc/manual/html_node/Noncanon-Example.html
@@ -157,6 +208,7 @@ exit_gracefully :: proc(t: ^posix.termios) {
   set_terminal_canonical_mode(t)
   fmt.print(ansi.CSI + ansi.DECTCEM_SHOW)
   log.destroy_console_logger(context.logger)
+  fmt.print("\e[0m") // reset all modes (styles and colors)
   os.exit(0)
 }
 
@@ -195,7 +247,7 @@ get_key_pressed :: proc() -> KeyboardKey {
 handle_input :: proc(key: KeyboardKey) -> bool {
   if key == KeyboardKey.KEY_NULL do return true // no input
   key_str, _ := fmt.enum_value_to_string(key)
-  fmt.printfln("Pressed %s (%d)", key_str, key)
+  log.infof("Pressed %s (%d)", key_str, key)
   #partial switch key {
     case .KEY_Q, .KEY_ESCAPE : return false
     
@@ -264,42 +316,77 @@ KeyboardKey :: enum {
 
 // OUTPUT
 
-ANSI_POSITION_FMT :: "%d;%d"
-ANSI_SET_CURSOR_FMT :: ansi.CSI + ANSI_POSITION_FMT + ansi.CUP
-ANSI_CLEAR_LINE :: ansi.CSI + ansi.FAINT + ansi.EL // \e[2K
-ANSI_GET_CURSOR_POSITION :: ansi.CSI + ansi.DSR
-ANSI_CLEAR_TTY :: ansi.CSI + ansi.FAINT + ansi.ED
+// AINSI CODES
+// https://gist.github.com/ConnerWill/d4b6c776b509add763e17f9f113fd25b
+
+ESC :: ansi.CSI                 // ESC[   escape
+CUP :: ansi.CUP                 // H      move cursor
+FAINT :: ansi.FAINT             // 2      erase
+MODE :: ansi.SGR                // m      graphic mode (style & color)
+ERASE_LINE :: ansi.EL           // K      erase in line
+ERASE_DISPLAY :: ansi.ED        // J      erase in dislay
+FG_COLOR :: ansi.FG_COLOR       // 38     foreground color
+BLINK_SLOW :: ansi.BLINK_SLOW   // 5      blinking < 150 per minute
+DSR :: ansi.DSR                 // 6n     request cursor position
+HIDE :: ansi.HIDE
+RESET :: ansi.RESET
+
+ANSI_SET_CURSO_TOP_LEFT :: ESC + CUP
+ANSI_SET_CURSOR_FMT :: ESC + "%d;%d" + CUP // \e[{line};{column}H
+ANSI_CLEAR_LINE :: ESC + "2" + ERASE_LINE // \e[2K  =>  2 for the entire line
+ANSI_GET_CURSOR_POSITION :: ESC + DSR
+ANSI_CLEAR_TTY :: ESC + "2" + ERASE_DISPLAY // \e[3J  =>  2 for entire screen
+ANSI_FOREGROUND_COLOR_FMT :: ESC + FG_COLOR + ";" + BLINK_SLOW + ";%d" + MODE  // \e[38;5;{color}m
+ANSI_HIDE :: ESC + "8" + MODE // \e[8m
+ANSI_END_HIDE :: ESC + FAINT + HIDE + MODE // \e[28m
+ANSI_RESET_MODES :: ESC + RESET + MODE
 
 display_home_screen :: proc() {
   fmt.print(ansi.CSI + ansi.DECTCEM_HIDE) // hide cursor
   fmt.println("esc or q for quit\n")
+  // TODO fmt.print("\e]0;this is the window title BEL")
 }
 
 scale_screen_to_tty :: proc(cli: ^Cli) {
   tty_resolution := get_tty_width_and_height().? or_else cli.tty.resolution
 
   tty_was_resized := (tty_resolution != cli.tty.resolution)
-  if tty_was_resized do update_cli_screen(&cli.screen, tty_resolution)
+  if tty_was_resized {
+    cli.tty.resolution = tty_resolution
+    update_cli_screen(&cli.screen, tty_resolution)
+    log.infof("TTY resized to %dx%d", tty_resolution.width, tty_resolution.height)
+  }
   cli.tty.was_resized = tty_was_resized
 }
 
 render :: proc(cli: ^Cli) {
-  of := cli.screen.coordinate
+  coordinate := cli.screen.coordinate
   s := cli.screen
 
   for &line in s.cells {
     for &cell in line {
-      cell = {r = '`', has_changed = true} if cell.r != '`' else {r = '`', has_changed = false}
+      cell = {r = '.'}
     }
   }
 
-  if cli.tty.was_resized do clear_tty_and_set_cells_to_changed(&cli.screen.cells)
-  else do for y in 0..<of.y do fmt.printf(ANSI_SET_CURSOR_FMT + ANSI_CLEAR_LINE, y, 0)
 
-  for line, i in s.cells {
-    fmt.printf(ANSI_SET_CURSOR_FMT, of.y + u16(i), of.x)
-    for cell in line do if cell.has_changed do fmt.printf("%c", cell.r)
+  // fmt.printf("\e[H\e[8m") TODO INVISIBLE MODE
+  // fmt.printf(ANSI_FOREGROUND_COLOR_FMT, 8)
+  if cli.tty.was_resized do clear_tty()
+
+  for y in 0..<coordinate.y do fmt.printf(ANSI_SET_CURSOR_FMT + ANSI_CLEAR_LINE, y, 0)
+  for line, y in s.cells {
+    fmt.printf(ANSI_SET_CURSOR_FMT, coordinate.y + u16(y),coordinate.x)
+    for cell, x in line do fmt.printf("%c", cell.r)
   }
+  // TODO set cursor bottom to follow
+
+  // log
+  bellow_screen := coordinate.y + s.resolution.height + 1
+  fmt.printf(ANSI_SET_CURSOR_FMT + ANSI_CLEAR_LINE, bellow_screen-1, 0)
+  l := cli.tty.log[:]
+  fmt.printf(ANSI_SET_CURSOR_FMT + "%s", bellow_screen, coordinate.x, l)
+  
 }
 
 get_tty_width_and_height :: proc() -> Maybe(Resolution) {
@@ -334,12 +421,8 @@ update_cli_screen :: proc(s: ^CliScreen, tty_res: Resolution) {
   }
 }
 
-clear_tty_and_set_cells_to_changed :: proc(cells: ^Cells) {
-  fmt.print(ANSI_CLEAR_TTY)
- 
-  for &line in cells {
-    for &cell in line do cell.has_changed = true
-  }
+clear_tty :: proc() {
+  fmt.print(ANSI_RESET_MODES + ANSI_CLEAR_TTY)
 }
 
 get_screen_width_and_height :: proc(max: Resolution, screen_ratio: f32) -> Resolution {

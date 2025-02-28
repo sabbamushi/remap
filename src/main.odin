@@ -1,3 +1,5 @@
+#+feature dynamic-literals
+
 package cli
 
 import "core:fmt"
@@ -99,7 +101,7 @@ my_logger :: proc() -> log.Logger {
     when time.IS_SUPPORTED do log.do_time_header(o, &buf, time.now())
     // log.do_location_header(o, &buf, c)
     if data.ident != "" do fmt.sbprintf(&buf, "[%s] ", data.ident)
-    
+
     GLOBAL_STATE.cli.tty.log = fmt.aprintf("%s%s\n", strings.to_string(buf), text)
   }
 
@@ -112,31 +114,17 @@ main :: proc () {
   conf := DEFAULT_CONFIGURATION
   context.logger = conf.LOGGER
 
-  cli := &GLOBAL_STATE.cli
-  cli^ = {
-    tty = init_tty(),
-    fps = conf.FPS,
-    frame_duration = auto_cast (1_000_000_000 / conf.FPS),
-    screen = {
-      ratio = conf.SCREEN_RATIO,
-      scale_refresh_rate = conf.SCALE_REFRESH_RATE,
-    },
-    clear_refresh_rate = conf.CLEAR_REFRESH_RATE,
+  GLOBAL_STATE = GlobalState {
+    cli = init_cli(conf),
+    game = init_game(),
   }
+  cli := &GLOBAL_STATE.cli
+
   // TODO catch SIGTERM
   defer exit_gracefully(&cli.tty.termios)
 
   scale_screen_to_tty(cli)
   display_home_screen()
-
-  GLOBAL_STATE.game.m.pieces[{0,0}] = {
-    borders={
-      north=domain.Biome.Plain,
-      east=domain.Biome.Plain,
-      south=domain.Biome.Plain,
-      west=domain.Biome.Plain,
-    }
-  }
 
   start: time.Tick
   for {
@@ -146,11 +134,44 @@ main :: proc () {
     if cli.current_frame % (cli.fps * cli.screen.scale_refresh_rate) == 0 do scale_screen_to_tty(cli)
     if cli.current_frame % (cli.fps * cli.clear_refresh_rate) == 0 do clear_tty()
     
-    render(cli)
+    render(&GLOBAL_STATE.cli)
 
     elapsed := time.tick_lap_time(&start)
     if elapsed < cli.frame_duration do time.accurate_sleep(cli.frame_duration - elapsed)
     cli.current_frame += 1
+  }
+}
+
+init_cli :: proc(using conf: Configuration) -> Cli {
+  return {
+    tty = init_tty(),
+    fps = FPS,
+    frame_duration = auto_cast (1_000_000_000 / FPS),
+    screen = {
+      ratio = SCREEN_RATIO,
+      scale_refresh_rate = SCALE_REFRESH_RATE,
+    },
+    clear_refresh_rate = CLEAR_REFRESH_RATE,
+  }
+}
+
+
+init_game :: proc() -> domain.Game {
+  spawn := domain.Piece{
+    borders={
+      north=domain.Biome.Plain,
+      east=domain.Biome.Plain,
+      south=domain.Biome.Plain,
+      west=domain.Biome.Plain,
+    }
+  }
+
+  return {
+    m = {
+      pieces = {
+        {0,0} = spawn
+      }
+    }
   }
 }
 
@@ -380,9 +401,6 @@ render :: proc(cli: ^Cli) {
     }
   }
 
-
-  // fmt.printf("\e[H\e[8m") TODO INVISIBLE MODE
-  // fmt.printf(ANSI_FOREGROUND_COLOR_FMT, 8)
   if cli.tty.was_resized do clear_tty()
 
   go_to :: ANSI_SET_CURSOR_FMT

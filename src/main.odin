@@ -59,7 +59,7 @@ Coordinate :: struct {x, y: u16}
 Cells :: [dynamic][dynamic]Cell
 Cell :: struct {
   r: rune,
-  color: string, // ansi color
+  color: u8, // 256 ansi colors
 }
 
 
@@ -97,7 +97,7 @@ my_logger :: proc() -> log.Logger {
     buf := strings.builder_from_bytes(backing[:])
     log.do_level_header(o, &buf, l)
     when time.IS_SUPPORTED do log.do_time_header(o, &buf, time.now())
-    log.do_location_header(o, &buf, c)
+    // log.do_location_header(o, &buf, c)
     if data.ident != "" do fmt.sbprintf(&buf, "[%s] ", data.ident)
     
     GLOBAL_STATE.cli.tty.log = fmt.aprintf("%s%s\n", strings.to_string(buf), text)
@@ -131,10 +131,10 @@ main :: proc () {
 
   GLOBAL_STATE.game.m.pieces[{0,0}] = {
     borders={
-      north=domain.BorderKind.Plain,
-      east=domain.BorderKind.Plain,
-      south=domain.BorderKind.Plain,
-      west=domain.BorderKind.Plain,
+      north=domain.Biome.Plain,
+      east=domain.Biome.Plain,
+      south=domain.Biome.Plain,
+      west=domain.Biome.Plain,
     }
   }
 
@@ -319,8 +319,13 @@ KeyboardKey :: enum {
 // AINSI CODES
 // https://gist.github.com/ConnerWill/d4b6c776b509add763e17f9f113fd25b
 
+// TODO using core:fmt
+// TODO idée : natural language api for ansi string creation (ansi.clear.tty.until.end() => "\e[1J" )
+
 ESC :: ansi.CSI                 // ESC[   escape
-CUP :: ansi.CUP                 // H      move cursor
+CUP :: ansi.CUP                 // H      cursor position
+LEFT :: ansi.CUB                // D
+RIGHT :: ansi.CUF               // C
 FAINT :: ansi.FAINT             // 2      erase
 MODE :: ansi.SGR                // m      graphic mode (style & color)
 ERASE_LINE :: ansi.EL           // K      erase in line
@@ -328,18 +333,25 @@ ERASE_DISPLAY :: ansi.ED        // J      erase in dislay
 FG_COLOR :: ansi.FG_COLOR       // 38     foreground color
 BLINK_SLOW :: ansi.BLINK_SLOW   // 5      blinking < 150 per minute
 DSR :: ansi.DSR                 // 6n     request cursor position
-HIDE :: ansi.HIDE
-RESET :: ansi.RESET
+HIDE :: ansi.HIDE               // 8
+RESET :: ansi.RESET             // 0
 
-ANSI_SET_CURSO_TOP_LEFT :: ESC + CUP
-ANSI_SET_CURSOR_FMT :: ESC + "%d;%d" + CUP // \e[{line};{column}H
-ANSI_CLEAR_LINE :: ESC + "2" + ERASE_LINE // \e[2K  =>  2 for the entire line
-ANSI_GET_CURSOR_POSITION :: ESC + DSR
-ANSI_CLEAR_TTY :: ESC + "2" + ERASE_DISPLAY // \e[3J  =>  2 for entire screen
+
+ANSI_SET_CURSOR_FMT :: ESC + "%d;%d" + CUP                // \e[{line};{column}H
+ANSI_MOVE_LEFT :: ESC + "1" + LEFT                        // \e[1D
+ANSI_MOVE_RIGHT :: ESC + "1" + RIGHT                      // \e[1C
+ANSI_GET_CURSOR_POSITION :: ESC + DSR                     // \e[6n
+ANSI_CLEAR_LINE :: ESC + "2" + ERASE_LINE                 // \e[2K  =>  2 for the entire line
+ANSI_CLEAR_LINE_UNTIL_END :: ESC + "0" + ERASE_LINE       // \e[0K
+ANSI_CLEAR_LINE_UNTIL_CURSOR :: ESC + "1" + ERASE_LINE    // \e[1K
+ANSI_CLEAR_TTY :: ESC + "2" + ERASE_DISPLAY               // \e[2J  =>  2 for entire screen
+ANSI_CLEAR_TTY_UNTIL_END :: ESC + "0" + ERASE_DISPLAY     // \e[0J
+ANSI_CLEAR_TTY_UNTIL_CURSOR :: ESC + "1" + ERASE_DISPLAY  // \e[1J
 ANSI_FOREGROUND_COLOR_FMT :: ESC + FG_COLOR + ";" + BLINK_SLOW + ";%d" + MODE  // \e[38;5;{color}m
-ANSI_HIDE :: ESC + "8" + MODE // \e[8m
-ANSI_END_HIDE :: ESC + FAINT + HIDE + MODE // \e[28m
-ANSI_RESET_MODES :: ESC + RESET + MODE
+ANSI_HIDE :: ESC + "8" + MODE                             // \e[8m
+ANSI_END_HIDE :: ESC + FAINT + HIDE + MODE                // \e[28m
+ANSI_RESET_MODES :: ESC + RESET + MODE                    // \e
+
 
 display_home_screen :: proc() {
   fmt.print(ansi.CSI + ansi.DECTCEM_HIDE) // hide cursor
@@ -354,18 +366,17 @@ scale_screen_to_tty :: proc(cli: ^Cli) {
   if tty_was_resized {
     cli.tty.resolution = tty_resolution
     update_cli_screen(&cli.screen, tty_resolution)
-    log.infof("TTY resized to %dx%d", tty_resolution.width, tty_resolution.height)
+    log.debugf("TTY resized to %dx%d", tty_resolution.width, tty_resolution.height)
   }
   cli.tty.was_resized = tty_was_resized
 }
 
 render :: proc(cli: ^Cli) {
-  coordinate := cli.screen.coordinate
   s := cli.screen
 
   for &line in s.cells {
     for &cell in line {
-      cell = {r = '.'}
+      cell = {r = '.', color = 238}
     }
   }
 
@@ -374,19 +385,36 @@ render :: proc(cli: ^Cli) {
   // fmt.printf(ANSI_FOREGROUND_COLOR_FMT, 8)
   if cli.tty.was_resized do clear_tty()
 
-  for y in 0..<coordinate.y do fmt.printf(ANSI_SET_CURSOR_FMT + ANSI_CLEAR_LINE, y, 0)
+  go_to :: ANSI_SET_CURSOR_FMT
+  pos := cli.screen.coordinate
+
+  // clear above screen
+  fmt.printf(go_to + ANSI_CLEAR_TTY_UNTIL_CURSOR, pos.y, pos.x)
+  
+  // display screen
   for line, y in s.cells {
-    fmt.printf(ANSI_SET_CURSOR_FMT, coordinate.y + u16(y),coordinate.x)
-    for cell, x in line do fmt.printf("%c", cell.r)
+    fmt.printf(go_to, pos.y + u16(y), pos.x)
+    if pos.x > 0 do fmt.printf(ANSI_CLEAR_LINE_UNTIL_CURSOR)
+    
+    for cell, x in line {
+      set_color := (x < 1 || cell.color != line[x-1].color)
+      color := fmt.aprintf(ANSI_FOREGROUND_COLOR_FMT, cell.color) if set_color else ""
+      fmt.printf("%s%c", color, cell.r)
+    }
+    if pos.x > 0 do fmt.printf(ANSI_CLEAR_LINE_UNTIL_END)
   }
-  // TODO set cursor bottom to follow
+
+  // clear bellow screen
+  bellow_screen := pos.y + s.resolution.height
+  fmt.printf(go_to + ANSI_CLEAR_TTY_UNTIL_END, bellow_screen, 0)
 
   // log
-  bellow_screen := coordinate.y + s.resolution.height + 1
-  fmt.printf(ANSI_SET_CURSOR_FMT + ANSI_CLEAR_LINE, bellow_screen-1, 0)
-  l := cli.tty.log[:]
-  fmt.printf(ANSI_SET_CURSOR_FMT + "%s", bellow_screen, coordinate.x, l)
-  
+  log := cli.tty.log[0:min(cast(u16)len(cli.tty.log), cli.tty.resolution.width)]
+  if log != "" && pos.y >= 1 {
+    fmt.printf(go_to + "%s", bellow_screen+1, pos.x, log)
+  }
+
+  // TODO set cursor bottom to follow
 }
 
 get_tty_width_and_height :: proc() -> Maybe(Resolution) {
@@ -450,3 +478,11 @@ get_screen_coordinate :: proc(max: Resolution, screen: Resolution) -> Coordinate
   y := (max.height - screen.height) / 2 if max.height > screen.height else 0
   return {x, y}
 }
+
+
+CellToRune :: [domain.Cell]rune {
+  .Nil =    ' ',
+  .Ground = '.',
+  .Tree =   '^',
+  .Rock =   '@',
+} 

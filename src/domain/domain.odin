@@ -12,11 +12,11 @@ Map :: struct {
 Position :: struct {x: i8, y: i8}
 
 Piece :: struct {
-  borders: struct {north, east, south, west : BorderKind},
+  borders: struct {north, east, south, west : Biome},
   grid : [8][8]Cell,
 }
 
-BorderKind :: enum {
+Biome :: enum {
   Forest,
   Sea,
   Plain,
@@ -24,6 +24,9 @@ BorderKind :: enum {
 
 Cell :: enum {
   Nil,
+  Ground,
+  Tree,
+  Rock,
 }
 
 Player :: struct {

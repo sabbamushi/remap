@@ -11,6 +11,7 @@ import "core:mem"
 import "core:strings"
 import "core:strconv"
 import "core:io"
+import "core:slice"
 import "base:runtime"
 import "domain"
 
@@ -114,7 +115,21 @@ my_logger :: proc() -> log.Logger {
 
 main :: proc () {
   conf := DEFAULT_CONFIGURATION
-  context.logger = conf.LOGGER
+
+  flags : posix.O_Flags = { .WRONLY, .CREAT }
+  mode : posix.mode_t = {.IRUSR, .IWUSR, .IRGRP, .IROTH }
+  
+  log_file := posix.open("remap.log", flags, mode)
+  if log_file < 0 do fmt.panicf("Cannot open log file : %s\n", fmt.enum_value_to_string(posix.errno()))
+
+  // msg := "AAA"
+  // nb := posix.write(fd = log_file, buf = raw_data(msg[:]), buflen = len(msg)+1)
+  // if nb < 0 do fmt.panicf("Could not write in log file : %s\n", fmt.enum_value_to_string(posix.errno()))
+
+  context.logger = log.create_file
+
+  defer posix.close(log_file)
+
 
   fmt.printf(SET_TTY_NAME_FMT, conf.GAME_NAME)
 
@@ -141,6 +156,7 @@ main :: proc () {
     if current_frame % (fps * clear_refresh_rate) == 0 do clear_tty()
     
     render(GLOBAL_STATE.camera, cli)
+    log.debug(GLOBAL_STATE.game.m.pieces[{0,0}])
 
     elapsed := time.tick_lap_time(&start)
     if elapsed < frame_duration do time.accurate_sleep(frame_duration - elapsed)
@@ -500,7 +516,7 @@ render :: proc(camera: Camera, using cli: ^Cli) {
   // TODO set cursor bottom to follow
 }
 
-CellToRune :: [domain.Cell]rune {
+CellToRune := [domain.Cell]rune {
   .Nil =    ' ',
   .Ground = '.',
   .Tree =   '^',
@@ -508,14 +524,39 @@ CellToRune :: [domain.Cell]rune {
 }
 
 
-camera_fill_screen :: proc (using c: Camera) {
-  using c.screen
 
+camera_fill_screen :: proc (using c: Camera) {
 
 
   for &line in screen.cells {
-    for &cell in line {
-      cell = {r = '.', color = 238}
+    slice.fill(line[:], Cell{r = '.', color = 238})
+  }
+  // camera
+  // zoom ?
+  center : Coordinate = {x = screen.resolution.width / 2, y = screen.resolution.height / 2}
+  edge_size :u16 = domain.PIECE_EDGE_SIZE 
+  spawn : struct {
+    using piece: domain.Piece,
+    position_in_screen: Coordinate,
+  }
+  spawn = {
+    position_in_screen = {
+      x = center.x - (edge_size/2),
+      y = center.y - (edge_size/2),
+    },
+  }
+  
+  for line, y in spawn.grid {
+    for cell, x in line {
+      cell_type, _ := fmt.enum_value_to_string(cell)
+      if cell != domain.Cell.Nil do log.infof("cell of %s", cell_type)
+      c.screen.cells[spawn.position_in_screen.y + u16(y)][spawn.position_in_screen.x + u16(x)] = {
+        r = CellToRune[cell],
+        color = 255 // white
+      }
     }
   }
+
+
+
 }

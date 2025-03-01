@@ -2,6 +2,8 @@
 
 package domain
 
+import "core:slice"
+
 Game :: struct {
   m: Map,
   player: Player,
@@ -47,8 +49,14 @@ init_game :: proc() -> Game {
       east = Biome.Plain,
       south = Biome.Plain,
       west = Biome.Plain,
-    }
+    },
   }
+
+  spawn.grid[0][0] = Cell.Tree
+  // slice.fill(spawn.grid[0][:], Cell.Ground)
+  // for &l in spawn.grid {
+  //   for &c in l do c = Cell.Ground
+  // }
 
   return Game {
     m = {

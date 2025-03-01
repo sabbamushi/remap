@@ -39,13 +39,13 @@ Cli :: struct {
   fps: u128,
   frame_duration: time.Duration, 
   clear_refresh_rate: u128,
+  logged: string,
 }
 
 Tty :: struct {
   termios: posix.termios, 
   resolution: Resolution,
   was_resized: bool,
-  log: string,
 }
 
 CliScreen :: struct {
@@ -89,7 +89,7 @@ my_logger :: proc() -> log.Logger {
   logger := log.create_console_logger()
 
   logger.procedure = proc(d: rawptr, l: log.Level, text: string, o: log.Options, c := #caller_location) {
-    delete(GLOBAL_STATE.cli.tty.log)
+    delete(GLOBAL_STATE.cli.logged)
 
     data := cast(^log.File_Console_Logger_Data)d
 
@@ -100,7 +100,7 @@ my_logger :: proc() -> log.Logger {
     // log.do_location_header(o, &buf, c)
     if data.ident != "" do fmt.sbprintf(&buf, "[%s] ", data.ident)
 
-    GLOBAL_STATE.cli.tty.log = fmt.aprintf("%s%s\n", strings.to_string(buf), text)
+    GLOBAL_STATE.cli.logged = fmt.aprintf("%s%s\n", strings.to_string(buf), text)
   }
 
   return logger
@@ -119,8 +119,10 @@ main :: proc () {
   cli := &GLOBAL_STATE.cli
   using cli
 
-  // TODO catch SIGTERM
   defer exit_gracefully(&tty.termios)
+  action : posix.sigaction_t = {sa_handler = catch_quit}
+  posix.sigaction(posix.Signal.SIGTERM, &action, nil);
+  posix.sigaction(posix.Signal.SIGINT, &action, nil);
 
   scale_screen_to_tty(cli)
   display_home_screen()
@@ -165,13 +167,20 @@ init_game :: proc() -> domain.Game {
     }
   }
 
-  return {
+  return domain.Game {
     m = {
       pieces = {
         {0,0} = spawn
       }
     }
   }
+}
+
+catch_quit :: proc "c" (s: posix.Signal) {
+  context = runtime.default_context()
+  str, _ := fmt.enum_value_to_string(s)
+  log.debugf("Quit with signal %s", str)
+  exit_gracefully(&GLOBAL_STATE.cli.tty.termios)
 }
 
 
@@ -426,7 +435,7 @@ render :: proc(using cli: ^Cli) {
   fmt.printf(go_to + CLEAR_TTY_UNTIL_END, bellow_screen, 0)
 
   // log
-  log := tty.log[0:min(cast(u16)len(tty.log), tty.resolution.width)]
+  log := logged[0:min(cast(u16)len(logged), tty.resolution.width)]
   if log != "" && pos.y >= 1 {
     fmt.printf(go_to + "%s", bellow_screen+1, pos.x, log)
   }

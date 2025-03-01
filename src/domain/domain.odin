@@ -1,3 +1,5 @@
+#+feature dynamic-literals
+
 package domain
 
 Game :: struct {
@@ -11,9 +13,11 @@ Map :: struct {
 
 Position :: struct {x: i8, y: i8}
 
+PIECE_EDGE_SIZE :: 8
+
 Piece :: struct {
   borders: struct {north, east, south, west : Biome},
-  grid : [8][8]Cell,
+  grid : [PIECE_EDGE_SIZE][PIECE_EDGE_SIZE]Cell,
 }
 
 Biome :: enum {
@@ -33,8 +37,27 @@ Player :: struct {
   position_in_piece: Position,
 }
 
-Camera :: struct {
-  game: ^Game,
-}
 
-// camera_to_screen
+
+
+init_game :: proc() -> Game {
+  spawn := Piece{
+    borders={
+      north = Biome.Plain,
+      east = Biome.Plain,
+      south = Biome.Plain,
+      west = Biome.Plain,
+    }
+  }
+
+  return Game {
+    m = {
+      pieces = {
+        {0,0} = spawn
+      }
+    },
+    player = {
+      position_in_piece = {x = PIECE_EDGE_SIZE/2, y = PIECE_EDGE_SIZE/2}
+    }
+  }
+}

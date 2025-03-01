@@ -1,5 +1,3 @@
-#+feature dynamic-literals
-
 package cli
 
 import "core:fmt"
@@ -30,6 +28,7 @@ GLOBAL_STATE : GlobalState
 GlobalState :: struct {
   game: domain.Game,
   cli: Cli,
+  camera: Camera,
 }
 
 Cli :: struct {
@@ -46,6 +45,7 @@ Tty :: struct {
   termios: posix.termios, 
   resolution: Resolution,
   was_resized: bool,
+  font_ratio: f32         "height/width of a tty cell, usually 2 (height = 2*width)",
 }
 
 CliScreen :: struct {
@@ -62,6 +62,12 @@ Cells :: [dynamic][dynamic]Cell
 Cell :: struct {
   r: rune,
   color: u8, // 256 ansi colors
+}
+
+Camera :: struct {
+  game: ^domain.Game,
+  screen: ^CliScreen,
+  // effects (colors, shader, etc)
 }
 
 
@@ -112,10 +118,9 @@ main :: proc () {
 
   fmt.printf(SET_TTY_NAME_FMT, conf.GAME_NAME)
 
-  GLOBAL_STATE = GlobalState {
-    cli = init_cli(conf),
-    game = init_game(),
-  }
+  GLOBAL_STATE = init_global_state(conf)
+  GLOBAL_STATE.camera = {game = &GLOBAL_STATE.game, screen = &GLOBAL_STATE.cli.screen}
+
   cli := &GLOBAL_STATE.cli
   using cli
 
@@ -135,7 +140,7 @@ main :: proc () {
     if current_frame % (fps * screen.scale_refresh_rate) == 0 do scale_screen_to_tty(cli)
     if current_frame % (fps * clear_refresh_rate) == 0 do clear_tty()
     
-    render(cli)
+    render(GLOBAL_STATE.camera, cli)
 
     elapsed := time.tick_lap_time(&start)
     if elapsed < frame_duration do time.accurate_sleep(frame_duration - elapsed)
@@ -143,9 +148,16 @@ main :: proc () {
   }
 }
 
+init_global_state :: proc(conf: Configuration) -> GlobalState {
+  return {
+    cli = init_cli(conf),
+    game = domain.init_game(),
+  }
+}
+
 init_cli :: proc(using conf: Configuration) -> Cli {
   return {
-    tty = init_tty(),
+    tty = init_tty(conf),
     fps = FPS,
     frame_duration = auto_cast (1_000_000_000 / FPS),
     screen = {
@@ -157,24 +169,6 @@ init_cli :: proc(using conf: Configuration) -> Cli {
 }
 
 
-init_game :: proc() -> domain.Game {
-  spawn := domain.Piece{
-    borders={
-      north=domain.Biome.Plain,
-      east=domain.Biome.Plain,
-      south=domain.Biome.Plain,
-      west=domain.Biome.Plain,
-    }
-  }
-
-  return domain.Game {
-    m = {
-      pieces = {
-        {0,0} = spawn
-      }
-    }
-  }
-}
 
 catch_quit :: proc "c" (s: posix.Signal) {
   context = runtime.default_context()
@@ -188,13 +182,14 @@ catch_quit :: proc "c" (s: posix.Signal) {
 
 CANONICAL_FLAGS : posix.CLocal_Flags : {.ICANON, .ECHO}
 
-init_tty :: proc() -> Tty {
+init_tty :: proc(conf: Configuration) -> Tty {
   termios := get_termios()
   set_terminal_non_canonical_mode(&termios)
   set_stdin_non_blocking()
 
   return {
     termios = termios,
+    font_ratio = conf.TTY_FONT_RATIO,
   }
 }
 
@@ -401,48 +396,6 @@ scale_screen_to_tty :: proc(using cli: ^Cli) {
   tty.was_resized = tty_was_resized
 }
 
-render :: proc(using cli: ^Cli) {
-
-  for &line in screen.cells {
-    for &cell in line {
-      cell = {r = '.', color = 238}
-    }
-  }
-
-  if tty.was_resized do clear_tty()
-
-  go_to :: SET_CURSOR_FMT
-  pos := screen.coordinate
-
-  // clear above screen
-  fmt.printf(go_to + CLEAR_TTY_UNTIL_CURSOR, pos.y, pos.x)
-  
-  // display screen
-  for line, y in screen.cells {
-    fmt.printf(go_to, pos.y + u16(y), pos.x)
-    if pos.x > 0 do fmt.printf(CLEAR_LINE_UNTIL_CURSOR)
-    
-    for cell, x in line {
-      set_color := (x < 1 || cell.color != line[x-1].color)
-      color := fmt.aprintf(FOREGROUND_COLOR_FMT, cell.color) if set_color else ""
-      fmt.printf("%s%c", color, cell.r)
-    }
-    if pos.x > 0 do fmt.printf(CLEAR_LINE_UNTIL_END)
-  }
-
-  // clear bellow screen
-  bellow_screen := pos.y + screen.resolution.height
-  fmt.printf(go_to + CLEAR_TTY_UNTIL_END, bellow_screen, 0)
-
-  // log
-  log := logged[0:min(cast(u16)len(logged), tty.resolution.width)]
-  if log != "" && pos.y >= 1 {
-    fmt.printf(go_to + "%s", bellow_screen+1, pos.x, log)
-  }
-
-  // TODO set cursor bottom to follow
-}
-
 get_tty_width_and_height :: proc() -> Maybe(Resolution) {
   set_stdin_blocking()
   fmt.printf(SET_CURSOR_FMT, 9999, 9999)
@@ -480,7 +433,7 @@ clear_tty :: proc() {
 }
 
 get_screen_width_and_height :: proc(using max: Resolution, screen_ratio: f32) -> Resolution {
-  scaled_max_width := width/2 // TTY_COLUMNS_LINES_RATIO
+  scaled_max_width := u16(f32(width) / GLOBAL_STATE.cli.tty.font_ratio)
   w, h : u16
   if screen_ratio == 1. {
     side := min(scaled_max_width, height)
@@ -496,7 +449,7 @@ get_screen_width_and_height :: proc(using max: Resolution, screen_ratio: f32) ->
     w, h = u16(f32(ratio_limit_height) * screen_ratio), ratio_limit_height
   }
 
-  return {w*2, h}
+  return { u16(f32(w) * GLOBAL_STATE.cli.tty.font_ratio), h}
 }
 
 get_screen_coordinate :: proc(max: Resolution, screen: Resolution) -> Coordinate {
@@ -506,9 +459,63 @@ get_screen_coordinate :: proc(max: Resolution, screen: Resolution) -> Coordinate
 }
 
 
+// RENDERING
+
+
+render :: proc(camera: Camera, using cli: ^Cli) {
+
+  if tty.was_resized do clear_tty()
+
+  camera_fill_screen(camera)
+
+  go_to :: SET_CURSOR_FMT
+  pos := screen.coordinate
+
+  // clear above screen
+  fmt.printf(go_to + CLEAR_TTY_UNTIL_CURSOR, pos.y, pos.x)
+  
+  // display screen
+  for line, y in screen.cells {
+    fmt.printf(go_to, pos.y + u16(y), pos.x)
+    if pos.x > 0 do fmt.printf(CLEAR_LINE_UNTIL_CURSOR)
+    
+    for cell, x in line {
+      set_color := (x < 1 || cell.color != line[x-1].color)
+      color := fmt.aprintf(FOREGROUND_COLOR_FMT, cell.color) if set_color else ""
+      fmt.printf("%s%c", color, cell.r)
+    }
+    if pos.x > 0 do fmt.printf(CLEAR_LINE_UNTIL_END)
+  }
+
+  // clear bellow screen
+  bellow_screen := pos.y + screen.resolution.height
+  fmt.printf(go_to + CLEAR_TTY_UNTIL_END, bellow_screen, 0)
+
+  // log
+  log := logged[0:min(cast(u16)len(logged), tty.resolution.width)]
+  if log != "" && pos.y >= 1 {
+    fmt.printf(go_to + "%s", bellow_screen+1, pos.x, log)
+  }
+
+  // TODO set cursor bottom to follow
+}
+
 CellToRune :: [domain.Cell]rune {
   .Nil =    ' ',
   .Ground = '.',
   .Tree =   '^',
   .Rock =   '@',
-} 
+}
+
+
+camera_fill_screen :: proc (using c: Camera) {
+  using c.screen
+
+
+
+  for &line in screen.cells {
+    for &cell in line {
+      cell = {r = '.', color = 238}
+    }
+  }
+}

@@ -75,10 +75,10 @@ Camera :: struct {
 Configuration :: struct {
   FPS: u128                     "Number of frames per seconds, u128 because calculations with big numbers",
   SCREEN_RATIO: f32             "Visual ratio of width/heigth",
-  SCALE_REFRESH_RATE: u128      "Number of seconds between two tty resize checks",
-  CLEAR_REFRESH_RATE: u128      "Number of seconds between two (ansi) clear of tty (in case of display bug)",
+  SCALE_REFRESH_RATE: u128      "Seconds between two tty resize checks",
+  CLEAR_REFRESH_RATE: u128      "Seconds between two (ansi) clear of tty",
   LOGGER: runtime.Logger,
-  TTY_FONT_RATIO:f32            "TTY ratio between cols and lines, lines are usually 2 times taller than a column is large", 
+  TTY_FONT_RATIO:f32            "TTY ratio between cols and lines", 
   GAME_NAME: string,
 }
 
@@ -88,7 +88,7 @@ DEFAULT_CONFIGURATION : Configuration = {
   SCALE_REFRESH_RATE = 1,
   CLEAR_REFRESH_RATE = 30,
   LOGGER = my_logger(),
-  TTY_FONT_RATIO = 2.,
+  TTY_FONT_RATIO = 2.,   // a tty line is usually 2 times taller than a column
   GAME_NAME = "REMAP",
 }
 

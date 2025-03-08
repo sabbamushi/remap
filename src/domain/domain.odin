@@ -52,11 +52,10 @@ init_game :: proc() -> Game {
     },
   }
 
-  spawn.grid[0][0] = Cell.Tree
-  // slice.fill(spawn.grid[0][:], Cell.Ground)
-  // for &l in spawn.grid {
-  //   for &c in l do c = Cell.Ground
-  // }
+  slice.fill(spawn.grid[0][:], Cell.Ground)
+  for &l in spawn.grid {
+    for &c in l do c = Cell.Ground
+  }
 
   return Game {
     m = {

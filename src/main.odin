@@ -41,7 +41,6 @@ Cli :: struct {
 	fps:                u128,
 	frame_duration:     time.Duration,
 	clear_refresh_rate: u128,
-	logged:             string,
 }
 
 Tty :: struct {
@@ -103,8 +102,6 @@ main :: proc() {
 	conf := DEFAULT_CONFIGURATION
 	context.logger = conf.LOGGER
 
-	fmt.printf(SET_TTY_NAME_FMT, conf.GAME_NAME)
-
 	GLOBAL_STATE = init_global_state(conf)
 	GLOBAL_STATE.camera = {
 		game   = &GLOBAL_STATE.game,
@@ -122,7 +119,7 @@ main :: proc() {
 	posix.sigaction(posix.Signal.SIGINT, &action, nil)
 
 	scale_screen_to_tty(cli)
-	display_home_screen()
+	display_home_screen(conf.GAME_NAME)
 
 	start: time.Tick
 	for {
@@ -133,7 +130,6 @@ main :: proc() {
 		if current_frame % (fps * clear_refresh_rate) == 0 do clear_tty()
 
 		render(GLOBAL_STATE.camera, cli)
-		log.debug(GLOBAL_STATE.game.m.pieces[{0, 0}])
 
 		elapsed := time.tick_lap_time(&start)
 		if elapsed < frame_duration do time.accurate_sleep(frame_duration - elapsed)
@@ -367,10 +363,10 @@ RESET_MODES :: ESC + RESET + MODE // \e0m
 SET_TTY_NAME_FMT :: ansi.OSC + RESET + ";%s" + ansi.BEL // "\e]2;REMAP\a"
 
 
-display_home_screen :: proc() {
+display_home_screen :: proc(game_name: string) {
 	fmt.print(HIDE_CURSOR) // hide cursor
 	fmt.println("esc or q for quit\n")
-	// TODO fmt.print("\e]0;this is the window title BEL")
+	fmt.printf(SET_TTY_NAME_FMT, game_name)
 }
 
 scale_screen_to_tty :: proc(using cli: ^Cli) {
@@ -480,12 +476,6 @@ render :: proc(camera: Camera, using cli: ^Cli) {
 	bellow_screen := pos.y + screen.resolution.height
 	fmt.printf(go_to + CLEAR_TTY_UNTIL_END, bellow_screen, 0)
 
-	// log
-	log := logged[0:min(cast(u16)len(logged), tty.resolution.width)]
-	if log != "" && pos.y >= 1 {
-		fmt.printf(go_to + "%s", bellow_screen + 1, pos.x, log)
-	}
-
 	// TODO set cursor bottom to follow
 }
 
@@ -498,8 +488,6 @@ CellToRune := [domain.Cell]rune {
 
 
 camera_fill_screen :: proc(using c: Camera) {
-
-
 	for &line in screen.cells {
 		slice.fill(line[:], Cell{r = '.', color = 238})
 	}
@@ -521,7 +509,6 @@ camera_fill_screen :: proc(using c: Camera) {
 	for line, y in spawn.grid {
 		for cell, x in line {
 			cell_type, _ := fmt.enum_value_to_string(cell)
-			if cell != domain.Cell.Nil do log.infof("cell of %s", cell_type)
 			c.screen.cells[spawn.position_in_screen.y + u16(y)][spawn.position_in_screen.x + u16(x)] =
 				{
 					r     = CellToRune[cell],

@@ -62,7 +62,7 @@ Resolution :: struct {
 	width, height: u16,
 }
 Coordinate :: struct {
-	x, y: u16,
+	x, y: i16,
 }
 Cells :: [dynamic][dynamic]Cell
 Cell :: struct {
@@ -440,7 +440,7 @@ get_screen_width_and_height :: proc(using max: Resolution, screen_ratio: f32) ->
 get_screen_coordinate :: proc(max: Resolution, screen: Resolution) -> Coordinate {
 	x := (max.width - screen.width) / 2 if max.width > screen.width else 0
 	y := (max.height - screen.height) / 2 if max.height > screen.height else 0
-	return {x, y}
+	return {i16(x), i16(y)}
 }
 
 
@@ -461,7 +461,7 @@ render :: proc(camera: Camera, using cli: ^Cli) {
 
 	// display screen
 	for line, y in screen.cells {
-		fmt.printf(go_to, pos.y + u16(y), pos.x)
+		fmt.printf(go_to, pos.y + i16(y), pos.x)
 		if pos.x > 0 do fmt.printf(CLEAR_LINE_UNTIL_CURSOR)
 
 		for cell, x in line {
@@ -473,7 +473,7 @@ render :: proc(camera: Camera, using cli: ^Cli) {
 	}
 
 	// clear bellow screen
-	bellow_screen := pos.y + screen.resolution.height
+	bellow_screen := pos.y + i16(screen.resolution.height)
 	fmt.printf(go_to + CLEAR_TTY_UNTIL_END, bellow_screen, 0)
 
 	// TODO set cursor bottom to follow
@@ -494,28 +494,67 @@ camera_fill_screen :: proc(using c: Camera) {
 	// camera
 	// zoom ?
 	center: Coordinate = {
-		x = screen.resolution.width / 2,
-		y = screen.resolution.height / 2,
+		x = i16(screen.resolution.width / 2),
+		y = i16(screen.resolution.height / 2),
 	}
-	edge_size: u16 = domain.PIECE_EDGE_SIZE
-	spawn: struct {
-		using piece:        domain.Piece,
-		position_in_screen: Coordinate,
+	edge_size: u8 = domain.PIECE_EDGE_SIZE
+	Piece :: struct {
+		using piece:       domain.Piece,
+		screen_coordinate: Coordinate,
+		color:             u8,
 	}
-	spawn = {
-		position_in_screen = {x = center.x - (edge_size / 2), y = center.y - (edge_size / 2)},
+
+	spawn: Piece = {
+		piece             = c.game.m.pieces[{0, 0}],
+		screen_coordinate = pos_to_coordinate({0, 0}, center),
+		color             = 146,
 	}
+	up: Piece = {
+		piece             = c.game.m.pieces[{0, -1}],
+		screen_coordinate = pos_to_coordinate({0, -1}, center),
+		color             = 216,
+	}
+
 
 	for line, y in spawn.grid {
 		for cell, x in line {
-			cell_type, _ := fmt.enum_value_to_string(cell)
-			c.screen.cells[spawn.position_in_screen.y + u16(y)][spawn.position_in_screen.x + u16(x)] =
-				{
-					r     = CellToRune[cell],
-					color = 255, // white
-				}
+			s_c: Cell = {
+				r     = CellToRune[domain.Cell(cell)],
+				color = spawn.color, // white
+			}
+			piece_coordinate := spawn.screen_coordinate
+			c.screen.cells[piece_coordinate.y + i16(y)][piece_coordinate.x + i16(x)] = s_c
+		}
+	}
+	for line, cell_y in up.grid {
+		for cell, cell_x in line {
+			s_c: Cell = {
+				r     = CellToRune[domain.Cell(cell)],
+				color = up.color, // white
+			}
+			piece_c := up.screen_coordinate
+			x := piece_c.x + i16(cell_x)
+			y := piece_c.y + i16(cell_y)
+			if coordinate_is_in_screen({x, y}, c.screen^) do c.screen.cells[y][x] = s_c
 		}
 	}
 
 
+}
+
+pos_to_coordinate :: proc(pos: domain.Position, center: Coordinate) -> Coordinate {
+	edge_size := domain.PIECE_EDGE_SIZE
+	spawn_coordinate: Coordinate = {
+		x = center.x - (i16(edge_size) / 2),
+		y = center.y - (i16(edge_size) / 2),
+	}
+
+	x: i16 = spawn_coordinate.x + (i16(pos.x) * i16(edge_size))
+	y: i16 = spawn_coordinate.y + (i16(pos.y) * i16(edge_size))
+
+	return Coordinate{x, y}
+}
+
+coordinate_is_in_screen :: proc(c: Coordinate, s: CliScreen) -> bool {
+	return c.x >= 0 && c.x < i16(s.resolution.width) && c.y >= 0 && c.y < i16(s.resolution.height)
 }

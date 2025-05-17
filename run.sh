@@ -2,5 +2,5 @@
 
 set -xe
 
-odin run src -out=build/remap
+odin run src/ui/raylib_ui -out=build/remap
 

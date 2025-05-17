@@ -27,6 +27,15 @@ Piece :: struct {
 	grid:    [PIECE_EDGE_SIZE][PIECE_EDGE_SIZE]Cell,
 }
 
+// ┌─▻    clockwise
+//   1 2 3        7 4 1
+//   4 5 6    →   8 5 2
+//   7 8 9        9 6 3
+//       ◅─┘
+rotate_piece_clockwise :: proc(using piece: Piece) {
+	
+}
+
 Biome :: enum {
 	Forest,
 	Sea,
@@ -61,7 +70,7 @@ init_game :: proc() -> Game {
 	}
 
 	return Game {
-		m = {pieces = {{0, 0} = spawn, {-1, 0} = spawn}},
+		m = {pieces = {{0, 0} = spawn}},
 		player = {position_in_piece = {x = i8(PIECE_EDGE_SIZE) / 2, y = i8(PIECE_EDGE_SIZE) / 2}},
 	}
 }

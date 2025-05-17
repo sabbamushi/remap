@@ -1,4 +1,4 @@
-package cli
+package cli_ui
 
 import "base:runtime"
 import "core:c"
@@ -14,13 +14,12 @@ import "core:strings"
 import "core:sys/posix"
 import "core:time"
 
-import "domain"
-import "infrastructure"
-
+import "../../domain"
+import "../../infrastructure"
+import "../../ui"
 
 STDIN :: posix.STDIN_FILENO
 STDOUT :: posix.STDOUT_FILENO
-
 
 // TODO FPS
 // https://gafferongames.com/post/fix_your_timestep/
@@ -45,25 +44,20 @@ Cli :: struct {
 
 Tty :: struct {
 	termios:     posix.termios,
-	resolution:  Resolution,
+	resolution:  ui.Resolution,
 	was_resized: bool,
 	font_ratio:  f32 "height/width of a tty cell, usually 2 (height = 2*width)",
 }
 
 CliScreen :: struct {
-	resolution:         Resolution,
+	resolution:         ui.Resolution,
 	ratio:              f32,
-	coordinate:         Coordinate,
+	coordinate:         ui.Coordinate,
 	cells:              Cells,
 	scale_refresh_rate: u128 "in seconds",
 }
 
-Resolution :: struct {
-	width, height: u16,
-}
-Coordinate :: struct {
-	x, y: i16,
-}
+
 Cells :: [dynamic][dynamic]Cell
 Cell :: struct {
 	r:     rune,
@@ -381,7 +375,7 @@ scale_screen_to_tty :: proc(using cli: ^Cli) {
 	tty.was_resized = tty_was_resized
 }
 
-get_tty_width_and_height :: proc() -> Maybe(Resolution) {
+get_tty_width_and_height :: proc() -> Maybe(ui.Resolution) {
 	set_stdin_blocking()
 	fmt.printf(SET_CURSOR_FMT, 9999, 9999)
 	fmt.println(GET_CURSOR_POSITION)
@@ -399,13 +393,12 @@ get_tty_width_and_height :: proc() -> Maybe(Resolution) {
 	height, w_ok := strconv.parse_uint(height_and_width_str[0])
 	width, h_ok := strconv.parse_uint(height_and_width_str[1])
 
-	if w_ok && h_ok do return Resolution{u16(width), u16(height)}
+	if w_ok && h_ok do return ui.Resolution{u16(width), u16(height)}
 	else do return nil
 }
 
-update_cli_screen :: proc(using screen: ^CliScreen, tty_res: Resolution) {
+update_cli_screen :: proc(using screen: ^CliScreen, tty_res: ui.Resolution) {
 	resolution = get_screen_width_and_height(tty_res, ratio)
-	coordinate = get_screen_coordinate(tty_res, resolution)
 
 	resize(&cells, resolution.height)
 	for &line in cells {
@@ -417,7 +410,7 @@ clear_tty :: proc() {
 	fmt.print(RESET_MODES + CLEAR_TTY)
 }
 
-get_screen_width_and_height :: proc(using max: Resolution, screen_ratio: f32) -> Resolution {
+get_screen_width_and_height :: proc(using max: ui.Resolution, screen_ratio: f32) -> ui.Resolution {
 	scaled_max_width := u16(f32(width) / GLOBAL_STATE.cli.tty.font_ratio)
 	w, h: u16
 	if screen_ratio == 1. {
@@ -436,13 +429,6 @@ get_screen_width_and_height :: proc(using max: Resolution, screen_ratio: f32) ->
 
 	return {u16(f32(w) * GLOBAL_STATE.cli.tty.font_ratio), h}
 }
-
-get_screen_coordinate :: proc(max: Resolution, screen: Resolution) -> Coordinate {
-	x := (max.width - screen.width) / 2 if max.width > screen.width else 0
-	y := (max.height - screen.height) / 2 if max.height > screen.height else 0
-	return {i16(x), i16(y)}
-}
-
 
 // RENDERING
 
@@ -493,58 +479,46 @@ camera_fill_screen :: proc(using c: Camera) {
 	}
 	// camera
 	// zoom ?
-	center: Coordinate = {
+	center: ui.Coordinate = {
 		x = i16(screen.resolution.width / 2),
 		y = i16(screen.resolution.height / 2),
 	}
 	edge_size: u8 = domain.PIECE_EDGE_SIZE
 	Piece :: struct {
 		using piece:       domain.Piece,
-		screen_coordinate: Coordinate,
+		screen_coordinate: ui.Coordinate,
 		color:             u8,
 	}
 
-	spawn: Piece = {
-		piece             = c.game.m.pieces[{0, 0}],
-		screen_coordinate = pos_to_coordinate({0, 0}, center),
-		color             = 146,
-	}
-	up: Piece = {
-		piece             = c.game.m.pieces[{0, -1}],
-		screen_coordinate = pos_to_coordinate({0, -1}, center),
-		color             = 216,
+	pieces: [dynamic]Piece
+	for pos, p in game.m.pieces {
+		append_elem(
+			&pieces,
+			Piece{piece = p, screen_coordinate = pos_to_coordinate(pos, center), color = 255},
+		)
 	}
 
-
-	for line, y in spawn.grid {
-		for cell, x in line {
-			s_c: Cell = {
-				r     = CellToRune[domain.Cell(cell)],
-				color = spawn.color, // white
+	for p in pieces {
+		log.debug(p)
+		for line, cell_y in p.grid {
+			for cell, cell_x in line {
+				s_c: Cell = {
+					r     = CellToRune[domain.Cell(cell)],
+					color = p.color, // white
+				}
+				piece_c := p.screen_coordinate
+				x := piece_c.x + i16(cell_x)
+				y := piece_c.y + i16(cell_y)
+				if coordinate_is_in_screen({x, y}, c.screen^) do c.screen.cells[y][x] = s_c
 			}
-			piece_coordinate := spawn.screen_coordinate
-			c.screen.cells[piece_coordinate.y + i16(y)][piece_coordinate.x + i16(x)] = s_c
 		}
 	}
-	for line, cell_y in up.grid {
-		for cell, cell_x in line {
-			s_c: Cell = {
-				r     = CellToRune[domain.Cell(cell)],
-				color = up.color, // white
-			}
-			piece_c := up.screen_coordinate
-			x := piece_c.x + i16(cell_x)
-			y := piece_c.y + i16(cell_y)
-			if coordinate_is_in_screen({x, y}, c.screen^) do c.screen.cells[y][x] = s_c
-		}
-	}
-
 
 }
 
-pos_to_coordinate :: proc(pos: domain.Position, center: Coordinate) -> Coordinate {
+pos_to_coordinate :: proc(pos: domain.Position, center: ui.Coordinate) -> ui.Coordinate {
 	edge_size := domain.PIECE_EDGE_SIZE
-	spawn_coordinate: Coordinate = {
+	spawn_coordinate: ui.Coordinate = {
 		x = center.x - (i16(edge_size) / 2),
 		y = center.y - (i16(edge_size) / 2),
 	}
@@ -552,9 +526,9 @@ pos_to_coordinate :: proc(pos: domain.Position, center: Coordinate) -> Coordinat
 	x: i16 = spawn_coordinate.x + (i16(pos.x) * i16(edge_size))
 	y: i16 = spawn_coordinate.y + (i16(pos.y) * i16(edge_size))
 
-	return Coordinate{x, y}
+	return ui.Coordinate{x, y}
 }
 
-coordinate_is_in_screen :: proc(c: Coordinate, s: CliScreen) -> bool {
+coordinate_is_in_screen :: proc(c: ui.Coordinate, s: CliScreen) -> bool {
 	return c.x >= 0 && c.x < i16(s.resolution.width) && c.y >= 0 && c.y < i16(s.resolution.height)
 }

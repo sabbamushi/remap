@@ -33,7 +33,7 @@ Piece :: struct {
 //   7 8 9        9 6 3
 //       ◅─┘
 rotate_piece_clockwise :: proc(using piece: Piece) {
-	
+
 }
 
 Biome :: enum {
@@ -53,6 +53,13 @@ Player :: struct {
 	position_in_piece: Position,
 }
 
+Direction :: enum {
+	None,
+	Up,
+	Down,
+	Right,
+	Left,
+}
 
 init_game :: proc() -> Game {
 	spawn := Piece {
